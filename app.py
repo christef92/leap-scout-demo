@@ -59,7 +59,7 @@ def scrape_startups():
 
     return list(set(results))[:50]
 
-# -------- GPT EXTRACTION --------
+# -------- GPT EXTRACTION (FIXED) --------
 @st.cache_data
 def extract_structured(texts):
     structured = []
@@ -71,25 +71,35 @@ def extract_structured(texts):
                 messages=[
                     {
                         "role": "system",
-                        "content": """Extract startup info in JSON:
-                        {
-                        "name": "",
-                        "sector": "",
-                        "country": "",
-                        "stage": ""
-                        }
-                        Only LATAM startups. If unknown, use "Unknown".
-                        """
+                        "content": """Return ONLY valid JSON.
+
+Format:
+{
+"name": "string",
+"sector": "string",
+"country": "string",
+"stage": "string"
+}
+
+Rules:
+- No text outside JSON
+- If unknown use "Unknown"
+"""
                     },
                     {"role": "user", "content": t}
                 ],
                 temperature=0
             )
 
-            data = json.loads(response.choices[0].message.content)
+            content = response.choices[0].message.content.strip()
+
+            # limpiar markdown ```json
+            content = content.replace("```json", "").replace("```", "").strip()
+
+            data = json.loads(content)
             structured.append(data)
 
-        except:
+        except Exception as e:
             structured.append({
                 "name": "Unknown",
                 "sector": "Unknown",
@@ -116,7 +126,7 @@ if st.button("🔎 Run Deal Sourcing"):
     # 🔥 extracción inteligente
     structured = extract_structured(startups_raw)
 
-    # limpiar texto
+    # limpiar texto para embeddings
     portfolio_clean = [clean_text(p) for p in portfolio]
     startups_clean = [clean_text(s) for s in startups_raw]
 
