@@ -4,7 +4,7 @@ import feedparser
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-import re
+import json
 
 st.title("🚀 LeapScout AI - LATAM Deal Sourcing")
 
@@ -34,7 +34,7 @@ def get_portfolio():
         "Rappi is a delivery and logistics super app"
     ]
 
-# -------- SCRAPING (MEJORADO) --------
+# -------- SCRAPING --------
 def scrape_startups():
     queries = [
         "startup latam seed",
@@ -43,9 +43,7 @@ def scrape_startups():
         "startup peru pre-seed",
         "startup chile saas seed",
         "startup argentina ronda seed",
-        "startup latinoamerica inversion seed",
         "startup AI latam funding",
-        "startup fintech latam ronda",
         "startup early stage latin america"
     ]
 
@@ -59,35 +57,49 @@ def scrape_startups():
             text = f"{entry.title}. {entry.summary}"
             results.append(text)
 
-    # quitar duplicados
-    results = list(set(results))
+    return list(set(results))[:50]
 
-    return results[:70]  # 🔥 volumen
+# -------- GPT EXTRACTION --------
+@st.cache_data
+def extract_structured(texts):
+    structured = []
 
-# -------- EXTRAER INFO --------
-def extract_info(text):
-    text_lower = text.lower()
+    for t in texts:
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """Extract startup info in JSON:
+                        {
+                        "name": "",
+                        "sector": "",
+                        "country": "",
+                        "stage": ""
+                        }
+                        Only LATAM startups. If unknown, use "Unknown".
+                        """
+                    },
+                    {"role": "user", "content": t}
+                ],
+                temperature=0
+            )
 
-    # país
-    countries = ["mexico", "colombia", "peru", "chile", "argentina"]
-    country = next((c for c in countries if c in text_lower), "Unknown")
+            data = json.loads(response.choices[0].message.content)
+            structured.append(data)
 
-    # etapa
-    if "pre-seed" in text_lower or "pre seed" in text_lower:
-        stage = "Pre-Seed"
-    elif "seed" in text_lower or "semilla" in text_lower:
-        stage = "Seed"
-    else:
-        stage = "Unknown"
+        except:
+            structured.append({
+                "name": "Unknown",
+                "sector": "Unknown",
+                "country": "Unknown",
+                "stage": "Unknown"
+            })
 
-    # 🔥 extraer nombre mejor
-    name = text.split(" - ")[0]
-    name = re.sub(r"[^A-Za-z0-9 ]", "", name)
-    name = name.strip()[:50]
+    return structured
 
-    return name, country.title(), stage
-
-# -------- LIMPIAR TEXTO --------
+# -------- CLEAN TEXT --------
 def clean_text(text):
     return f"Startup en Latinoamérica en etapa temprana: {text}"
 
@@ -101,7 +113,10 @@ if st.button("🔎 Run Deal Sourcing"):
         st.error("No se encontraron startups")
         st.stop()
 
-    # limpiar
+    # 🔥 extracción inteligente
+    structured = extract_structured(startups_raw)
+
+    # limpiar texto
     portfolio_clean = [clean_text(p) for p in portfolio]
     startups_clean = [clean_text(s) for s in startups_raw]
 
@@ -116,19 +131,18 @@ if st.button("🔎 Run Deal Sourcing"):
         sims = cosine_similarity([emb], portfolio_emb)
         score = float(np.max(sims))
 
-        name, country, stage = extract_info(s)
+        info = structured[i]
 
         results.append({
-            "Startup": name,
-            "Country": country,
-            "Stage": stage,
-            "Similarity Score": round(score, 3),
-            "Contact": "N/A"
+            "Startup": info.get("name", "Unknown"),
+            "Sector": info.get("sector", "Unknown"),
+            "Country": info.get("country", "Unknown"),
+            "Stage": info.get("stage", "Unknown"),
+            "Similarity Score": round(score, 3)
         })
 
     df = pd.DataFrame(results)
 
-    # ordenar
     df = df.sort_values(by="Similarity Score", ascending=False)
 
     df["Rank"] = range(1, len(df)+1)
