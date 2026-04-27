@@ -6,9 +6,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import json
 
-st.title("🚀 VC OS - Latin Leap (Early Stage Focus)")
+st.title("🚀 VC OS - Latin Leap (Clean Deal Flow)")
 
-# -------- CONFIG --------
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
 # -------- PORTFOLIO --------
@@ -26,7 +25,7 @@ def fetch_sources():
         "fintech mexico ronda seed",
         "startup colombia pre-seed",
         "startup chile inversion seed",
-        "startup argentina venture capital early stage",
+        "startup argentina early stage",
         "startup peru pre-seed",
         "AI startup latam funding"
     ]
@@ -43,14 +42,12 @@ def fetch_sources():
 
 # -------- CLEAN --------
 def clean_data(texts):
-    filtered = []
-    for t in texts:
-        tl = t.lower()
-        if any(c in tl for c in ["mexico","colombia","peru","chile","argentina","latam"]):
-            filtered.append(t)
-    return filtered[:100]
+    return [
+        t for t in texts
+        if any(c in t.lower() for c in ["mexico","colombia","peru","chile","argentina","latam"])
+    ][:100]
 
-# -------- ENTITY EXTRACTION --------
+# -------- EXTRACT --------
 @st.cache_data
 def extract_entities(texts):
     results = []
@@ -62,9 +59,7 @@ def extract_entities(texts):
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are a VC analyst.
-
-Extract startup info.
+                        "content": """Extract startup info.
 
 Return ONLY JSON:
 
@@ -77,12 +72,10 @@ Return ONLY JSON:
 "founder_background": ""
 }
 
-Stage rules:
-- Only use: Pre-Seed, Seed, Series A, Growth
-- If IPO, unicorn, Series B+, mark as "Growth"
-
-Infer missing info when possible.
-Never leave empty fields.
+Rules:
+- Only startups
+- If not a startup → name = "Invalid"
+- Infer missing data
 """
                     },
                     {"role": "user", "content": t}
@@ -103,16 +96,57 @@ Never leave empty fields.
 
     return results
 
-# -------- FILTER STAGE --------
-def is_early_stage(stage):
-    stage = stage.lower()
+# -------- VALIDATION --------
+def is_real_startup(name):
+    name_lower = name.lower()
 
-    if any(x in stage for x in ["growth", "ipo", "series b", "series c", "unicorn"]):
+    blacklist = [
+        "top", "latam startups", "startup", "ventures",
+        "capital", "vc", "fund", "list", "ranking",
+        "ecosystem", "report"
+    ]
+
+    if len(name.split()) > 5:
+        return False
+
+    if any(b in name_lower for b in blacklist):
+        return False
+
+    if name_lower in ["startup", "company", "business"]:
         return False
 
     return True
 
-# -------- ENRICH UNKNOWN --------
+
+def validate_startup(name):
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Answer YES or NO: is this a real startup?"
+                },
+                {"role": "user", "content": name}
+            ],
+            temperature=0
+        )
+
+        return "yes" in response.choices[0].message.content.lower()
+
+    except:
+        return True
+
+# -------- STAGE FILTER --------
+def is_early_stage(stage):
+    stage = stage.lower()
+
+    if any(x in stage for x in ["ipo", "growth", "series b", "series c", "unicorn"]):
+        return False
+
+    return True
+
+# -------- ENRICH --------
 def enrich_unknown(s):
     try:
         response = client.chat.completions.create(
@@ -120,7 +154,7 @@ def enrich_unknown(s):
             messages=[
                 {
                     "role": "system",
-                    "content": """Improve startup data.
+                    "content": """Fill missing startup info.
 
 Return JSON:
 {
@@ -128,14 +162,9 @@ Return JSON:
 "country": "",
 "stage": ""
 }
-
-Infer best possible values.
 """
                 },
-                {
-                    "role": "user",
-                    "content": f"Startup: {s['name']}. Fill missing info."
-                }
+                {"role": "user", "content": f"Startup: {s['name']}"}
             ],
             temperature=0
         )
@@ -145,9 +174,9 @@ Infer best possible values.
 
         data = json.loads(content)
 
-        for k in ["sector","country","stage"]:
-            if s.get(k) == "Unknown" and data.get(k):
-                s[k] = data[k]
+        for k in ["sector", "country", "stage"]:
+            if s.get(k) == "Unknown":
+                s[k] = data.get(k, s[k])
 
     except:
         pass
@@ -157,31 +186,26 @@ Infer best possible values.
 # -------- EMBEDDINGS --------
 @st.cache_data
 def get_embeddings(texts):
-    texts = [str(t)[:300] for t in texts if t and isinstance(t, str)]
+    texts = [str(t)[:300] for t in texts if t]
     texts = texts[:66]
 
-    SUB_BATCH = 20
     all_embeddings = []
-
-    for i in range(0, len(texts), SUB_BATCH):
-        batch = texts[i:i+SUB_BATCH]
-
+    for i in range(0, len(texts), 20):
         res = client.embeddings.create(
             model="text-embedding-3-small",
-            input=batch
+            input=texts[i:i+20]
         )
-
         all_embeddings.extend([d.embedding for d in res.data])
 
     return all_embeddings
 
 # -------- FOUNDER SCORE --------
-def score_founder(background):
-    bg = background.lower()
+def score_founder(bg):
+    bg = bg.lower()
 
-    if any(x in bg for x in ["ex-google", "ex-amazon", "ex-mckinsey", "ex-rappi", "ex-uber"]):
+    if any(x in bg for x in ["ex-google","ex-amazon","ex-mckinsey","ex-rappi","ex-uber"]):
         return 3
-    elif any(x in bg for x in ["startup", "tech", "fintech", "engineer"]):
+    elif any(x in bg for x in ["startup","tech","fintech"]):
         return 2
     elif bg == "unknown":
         return 0
@@ -191,44 +215,42 @@ def score_founder(background):
 # -------- SCORING --------
 def score_startups(startups):
 
-    valid_startups = [
-        s for s in startups
-        if isinstance(s.get("name"), str) and len(s["name"]) > 2
-    ][:66]
+    valid = []
+    for s in startups:
+        name = s.get("name", "")
+        if name != "Invalid" and is_real_startup(name) and validate_startup(name):
+            valid.append(s)
+
+    valid = valid[:66]
 
     portfolio_emb = get_embeddings(PORTFOLIO)
-    startup_names = [s["name"] for s in valid_startups]
-    startup_emb = get_embeddings(startup_names)
+    startup_emb = get_embeddings([s["name"] for s in valid])
 
-    scored = []
+    results = []
 
-    for i, s in enumerate(valid_startups):
+    for i, s in enumerate(valid):
 
-        # 🔥 enrich missing data
-        if "Unknown" in [s.get("sector"), s.get("country"), s.get("stage")]:
-            s = enrich_unknown(s)
+        s = enrich_unknown(s)
 
-        # 🔥 filtrar late stage
         if not is_early_stage(s.get("stage", "")):
             continue
 
         sims = cosine_similarity([startup_emb[i]], portfolio_emb)
-        similarity = float(np.max(sims))
+        sim = float(np.max(sims))
 
         f_score = score_founder(s.get("founder_background", ""))
 
-        scored.append({
-            "Startup": s.get("name", "Unknown"),
-            "Sector": s.get("sector", "Unknown"),
-            "Country": s.get("country", "Unknown"),
-            "Stage": s.get("stage", "Unknown"),
-            "Founders": s.get("founders", "Unknown"),
-            "Founder Background": s.get("founder_background", "Unknown"),
-            "Similarity Score": round(similarity, 3),
-            "Founder Score": f_score
+        results.append({
+            "Startup": s["name"],
+            "Sector": s["sector"],
+            "Country": s["country"],
+            "Stage": s["stage"],
+            "Founders": s["founders"],
+            "Founder Score": f_score,
+            "Similarity Score": round(sim, 3)
         })
 
-    return scored
+    return results
 
 # -------- OUTPUT --------
 def build_table(data):
@@ -237,17 +259,10 @@ def build_table(data):
     if df.empty:
         return df
 
-    df["Final Score"] = (
-        df["Similarity Score"] * 0.7 +
-        df["Founder Score"] * 0.3
-    )
-
+    df["Final Score"] = df["Similarity Score"] * 0.7 + df["Founder Score"] * 0.3
     df = df.sort_values(by="Final Score", ascending=False)
 
     df["Rank"] = range(1, len(df)+1)
-    df["Fit"] = df["Final Score"].apply(
-        lambda x: "🔥 High" if x > 0.85 else ("👍 Medium" if x > 0.7 else "Low")
-    )
 
     return df
 
@@ -258,16 +273,15 @@ if st.button("🚀 Run VC OS"):
     clean = clean_data(raw)
     startups = extract_entities(clean)
 
-    if len(startups) == 0:
+    if not startups:
         st.error("No startups extracted")
         st.stop()
 
     scored = score_startups(startups)
 
-    if len(scored) == 0:
-        st.warning("No early-stage startups found")
+    if not scored:
+        st.warning("No valid startups after filtering")
         st.stop()
 
     df = build_table(scored)
-
     st.dataframe(df)
