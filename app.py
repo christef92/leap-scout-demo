@@ -4,6 +4,7 @@ import feedparser
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+import re
 
 st.title("🚀 LeapScout AI - LATAM Deal Sourcing")
 
@@ -33,33 +34,37 @@ def get_portfolio():
         "Rappi is a delivery and logistics super app"
     ]
 
-# -------- SCRAPING (RSS NEWS) --------
+# -------- SCRAPING (MEJORADO) --------
 def scrape_startups():
-    feeds = [
-        "https://news.google.com/rss/search?q=startup+latam+seed&hl=es-419&gl=MX&ceid=MX:es-419",
-        "https://news.google.com/rss/search?q=startup+fintech+mexico+seed&hl=es-419&gl=MX&ceid=MX:es-419",
-        "https://news.google.com/rss/search?q=startup+colombia+pre-seed&hl=es-419&gl=CO&ceid=CO:es-419"
+    queries = [
+        "startup latam seed",
+        "startup fintech mexico seed",
+        "startup colombia tecnologia seed",
+        "startup peru pre-seed",
+        "startup chile saas seed",
+        "startup argentina ronda seed",
+        "startup latinoamerica inversion seed",
+        "startup AI latam funding",
+        "startup fintech latam ronda",
+        "startup early stage latin america"
     ]
 
     results = []
 
-    for url in feeds:
+    for q in queries:
+        url = f"https://news.google.com/rss/search?q={q.replace(' ', '+')}&hl=es-419&gl=MX&ceid=MX:es-419"
         feed = feedparser.parse(url)
 
-        for entry in feed.entries[:5]:
+        for entry in feed.entries:
             text = f"{entry.title}. {entry.summary}"
+            results.append(text)
 
-            # filtro LATAM + etapa
-            if any(word in text.lower() for word in [
-                "mexico", "colombia", "peru", "chile", "argentina", "latam"
-            ]) and any(word in text.lower() for word in [
-                "seed", "pre-seed", "semilla"
-            ]):
-                results.append(text)
+    # quitar duplicados
+    results = list(set(results))
 
-    return list(set(results))[:10]
+    return results[:70]  # 🔥 volumen
 
-# -------- EXTRACTION --------
+# -------- EXTRAER INFO --------
 def extract_info(text):
     text_lower = text.lower()
 
@@ -75,12 +80,14 @@ def extract_info(text):
     else:
         stage = "Unknown"
 
-    # nombre (heurística simple)
-    name = text.split(".")[0][:60]
+    # 🔥 extraer nombre mejor
+    name = text.split(" - ")[0]
+    name = re.sub(r"[^A-Za-z0-9 ]", "", name)
+    name = name.strip()[:50]
 
     return name, country.title(), stage
 
-# -------- CLEAN TEXT --------
+# -------- LIMPIAR TEXTO --------
 def clean_text(text):
     return f"Startup en Latinoamérica en etapa temprana: {text}"
 
@@ -94,9 +101,11 @@ if st.button("🔎 Run Deal Sourcing"):
         st.error("No se encontraron startups")
         st.stop()
 
+    # limpiar
     portfolio_clean = [clean_text(p) for p in portfolio]
     startups_clean = [clean_text(s) for s in startups_raw]
 
+    # embeddings
     portfolio_emb = get_embeddings(portfolio_clean)
     startup_emb = get_embeddings(startups_clean)
 
@@ -118,6 +127,8 @@ if st.button("🔎 Run Deal Sourcing"):
         })
 
     df = pd.DataFrame(results)
+
+    # ordenar
     df = df.sort_values(by="Similarity Score", ascending=False)
 
     df["Rank"] = range(1, len(df)+1)
