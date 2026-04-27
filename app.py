@@ -6,7 +6,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import json
 
-st.title("🚀 VC OS - Latin Leap (Founder-Aware)")
+st.title("🚀 VC OS - Latin Leap (Early Stage Focus)")
 
 # -------- CONFIG --------
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
@@ -22,11 +22,11 @@ PORTFOLIO = [
 # -------- SOURCE --------
 def fetch_sources():
     queries = [
-        "startup latam funding",
-        "fintech mexico ronda",
-        "startup colombia seed",
-        "startup chile inversion",
-        "startup argentina venture capital",
+        "startup latam seed",
+        "fintech mexico ronda seed",
+        "startup colombia pre-seed",
+        "startup chile inversion seed",
+        "startup argentina venture capital early stage",
         "startup peru pre-seed",
         "AI startup latam funding"
     ]
@@ -44,12 +44,10 @@ def fetch_sources():
 # -------- CLEAN --------
 def clean_data(texts):
     filtered = []
-
     for t in texts:
         tl = t.lower()
         if any(c in tl for c in ["mexico","colombia","peru","chile","argentina","latam"]):
             filtered.append(t)
-
     return filtered[:100]
 
 # -------- ENTITY EXTRACTION --------
@@ -66,7 +64,7 @@ def extract_entities(texts):
                         "role": "system",
                         "content": """You are a VC analyst.
 
-Extract startup + founder info.
+Extract startup info.
 
 Return ONLY JSON:
 
@@ -79,7 +77,12 @@ Return ONLY JSON:
 "founder_background": ""
 }
 
-If unknown use "Unknown"
+Stage rules:
+- Only use: Pre-Seed, Seed, Series A, Growth
+- If IPO, unicorn, Series B+, mark as "Growth"
+
+Infer missing info when possible.
+Never leave empty fields.
 """
                     },
                     {"role": "user", "content": t}
@@ -99,6 +102,57 @@ If unknown use "Unknown"
             continue
 
     return results
+
+# -------- FILTER STAGE --------
+def is_early_stage(stage):
+    stage = stage.lower()
+
+    if any(x in stage for x in ["growth", "ipo", "series b", "series c", "unicorn"]):
+        return False
+
+    return True
+
+# -------- ENRICH UNKNOWN --------
+def enrich_unknown(s):
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Improve startup data.
+
+Return JSON:
+{
+"sector": "",
+"country": "",
+"stage": ""
+}
+
+Infer best possible values.
+"""
+                },
+                {
+                    "role": "user",
+                    "content": f"Startup: {s['name']}. Fill missing info."
+                }
+            ],
+            temperature=0
+        )
+
+        content = response.choices[0].message.content.strip()
+        content = content.replace("```json", "").replace("```", "")
+
+        data = json.loads(content)
+
+        for k in ["sector","country","stage"]:
+            if s.get(k) == "Unknown" and data.get(k):
+                s[k] = data[k]
+
+    except:
+        pass
+
+    return s
 
 # -------- EMBEDDINGS --------
 @st.cache_data
@@ -142,9 +196,6 @@ def score_startups(startups):
         if isinstance(s.get("name"), str) and len(s["name"]) > 2
     ][:66]
 
-    if len(valid_startups) == 0:
-        return []
-
     portfolio_emb = get_embeddings(PORTFOLIO)
     startup_names = [s["name"] for s in valid_startups]
     startup_emb = get_embeddings(startup_names)
@@ -152,6 +203,15 @@ def score_startups(startups):
     scored = []
 
     for i, s in enumerate(valid_startups):
+
+        # 🔥 enrich missing data
+        if "Unknown" in [s.get("sector"), s.get("country"), s.get("stage")]:
+            s = enrich_unknown(s)
+
+        # 🔥 filtrar late stage
+        if not is_early_stage(s.get("stage", "")):
+            continue
+
         sims = cosine_similarity([startup_emb[i]], portfolio_emb)
         similarity = float(np.max(sims))
 
@@ -177,16 +237,11 @@ def build_table(data):
     if df.empty:
         return df
 
-    # 🔥 combinar scores (clave VC)
     df["Final Score"] = (
         df["Similarity Score"] * 0.7 +
         df["Founder Score"] * 0.3
     )
 
-    # 🔥 filtro más flexible
-    df = df[df["Similarity Score"] > 0.65]
-
-    # ordenar
     df = df.sort_values(by="Final Score", ascending=False)
 
     df["Rank"] = range(1, len(df)+1)
@@ -210,13 +265,9 @@ if st.button("🚀 Run VC OS"):
     scored = score_startups(startups)
 
     if len(scored) == 0:
-        st.error("No valid startups after scoring")
+        st.warning("No early-stage startups found")
         st.stop()
 
     df = build_table(scored)
-
-    if df.empty:
-        st.warning("No high-quality startups found. Showing all results.")
-        df = pd.DataFrame(scored)
 
     st.dataframe(df)
