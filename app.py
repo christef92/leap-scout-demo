@@ -6,7 +6,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import json
 
-st.title("🚀 VC OS - Latin Leap")
+st.title("🚀 VC OS - Latin Leap (Founder-Aware)")
 
 # -------- CONFIG --------
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
@@ -19,7 +19,7 @@ PORTFOLIO = [
     "Logistics and delivery platforms"
 ]
 
-# -------- 1. SOURCE --------
+# -------- SOURCE --------
 def fetch_sources():
     queries = [
         "startup latam funding",
@@ -42,7 +42,7 @@ def fetch_sources():
 
     return list(set(data))
 
-# -------- 2. CLEAN --------
+# -------- CLEAN --------
 def clean_data(texts):
     filtered = []
 
@@ -54,7 +54,7 @@ def clean_data(texts):
 
     return filtered[:100]
 
-# -------- 3. ENTITY EXTRACTION --------
+# -------- ENTITY EXTRACTION --------
 @st.cache_data
 def extract_entities(texts):
     results = []
@@ -66,14 +66,25 @@ def extract_entities(texts):
                 messages=[
                     {
                         "role": "system",
-                        "content": """Extract startup info. Return ONLY JSON:
+                        "content": """You are a VC analyst.
+
+Extract startup + founder info.
+
+Return ONLY JSON:
 
 {
 "name": "",
 "sector": "",
 "country": "",
-"stage": ""
+"stage": "",
+"founders": "",
+"founder_background": ""
 }
+
+Rules:
+- founders = names if mentioned
+- founder_background = prior companies or experience
+- if unknown use "Unknown"
 """
                     },
                     {"role": "user", "content": t}
@@ -94,13 +105,10 @@ def extract_entities(texts):
 
     return results
 
-# -------- 4. EMBEDDINGS (FIXED BATCH) --------
+# -------- EMBEDDINGS --------
 @st.cache_data
 def get_embeddings(texts):
-    # limpiar textos
     texts = [str(t)[:300] for t in texts if t and isinstance(t, str)]
-
-    # límite total
     texts = texts[:66]
 
     SUB_BATCH = 20
@@ -118,7 +126,20 @@ def get_embeddings(texts):
 
     return all_embeddings
 
-# -------- 5. SCORING --------
+# -------- FOUNDER SCORE --------
+def score_founder(background):
+    bg = background.lower()
+
+    if any(x in bg for x in ["ex-google", "ex-amazon", "ex-mckinsey", "ex-rappi", "ex-uber"]):
+        return 3
+    elif any(x in bg for x in ["startup", "tech", "fintech", "engineer"]):
+        return 2
+    elif bg == "unknown":
+        return 0
+    else:
+        return 1
+
+# -------- SCORING --------
 def score_startups(startups):
 
     valid_startups = [
@@ -139,24 +160,35 @@ def score_startups(startups):
         sims = cosine_similarity([startup_emb[i]], portfolio_emb)
         score = float(np.max(sims))
 
+        f_score = score_founder(s.get("founder_background", ""))
+
         scored.append({
             "Startup": s.get("name", "Unknown"),
             "Sector": s.get("sector", "Unknown"),
             "Country": s.get("country", "Unknown"),
             "Stage": s.get("stage", "Unknown"),
-            "Score": round(score, 3)
+            "Founders": s.get("founders", "Unknown"),
+            "Founder Background": s.get("founder_background", "Unknown"),
+            "Similarity Score": round(score, 3),
+            "Founder Score": f_score
         })
 
     return scored
 
-# -------- 6. OUTPUT --------
+# -------- OUTPUT --------
 def build_table(data):
     df = pd.DataFrame(data)
 
-    df = df.sort_values(by="Score", ascending=False)
+    # 🔥 filtro VC real
+    df = df[
+        (df["Similarity Score"] > 0.75) &
+        (df["Founder Score"] >= 2)
+    ]
+
+    df = df.sort_values(by="Similarity Score", ascending=False)
 
     df["Rank"] = range(1, len(df)+1)
-    df["Fit"] = df["Score"].apply(
+    df["Fit"] = df["Similarity Score"].apply(
         lambda x: "🔥 High" if x > 0.85 else ("👍 Medium" if x > 0.75 else "Low")
     )
 
@@ -165,27 +197,20 @@ def build_table(data):
 # -------- MAIN --------
 if st.button("🚀 Run VC OS"):
 
-    # 1. source
     raw = fetch_sources()
-
-    # 2. clean
     clean = clean_data(raw)
-
-    # 3. extract
     startups = extract_entities(clean)
 
     if len(startups) == 0:
         st.error("No startups extracted")
         st.stop()
 
-    # 4. score
     scored = score_startups(startups)
 
     if len(scored) == 0:
-        st.error("No valid startups after cleaning")
+        st.error("No valid startups after scoring")
         st.stop()
 
-    # 5. output
     df = build_table(scored)
 
     st.dataframe(df)
