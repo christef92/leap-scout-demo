@@ -1,0 +1,6 @@
+streamlit
+pandas
+openai
+scikit-learn
+requests
+beautifulsoup4  
