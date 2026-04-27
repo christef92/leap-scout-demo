@@ -32,7 +32,6 @@ def fetch_sources():
     ]
 
     data = []
-
     for q in queries:
         url = f"https://news.google.com/rss/search?q={q.replace(' ', '+')}&hl=es-419"
         feed = feedparser.parse(url)
@@ -48,7 +47,6 @@ def clean_data(texts):
 
     for t in texts:
         tl = t.lower()
-
         if any(c in tl for c in ["mexico","colombia","peru","chile","argentina","latam"]):
             filtered.append(t)
 
@@ -81,10 +79,7 @@ Return ONLY JSON:
 "founder_background": ""
 }
 
-Rules:
-- founders = names if mentioned
-- founder_background = prior companies or experience
-- if unknown use "Unknown"
+If unknown use "Unknown"
 """
                     },
                     {"role": "user", "content": t}
@@ -158,7 +153,7 @@ def score_startups(startups):
 
     for i, s in enumerate(valid_startups):
         sims = cosine_similarity([startup_emb[i]], portfolio_emb)
-        score = float(np.max(sims))
+        similarity = float(np.max(sims))
 
         f_score = score_founder(s.get("founder_background", ""))
 
@@ -169,7 +164,7 @@ def score_startups(startups):
             "Stage": s.get("stage", "Unknown"),
             "Founders": s.get("founders", "Unknown"),
             "Founder Background": s.get("founder_background", "Unknown"),
-            "Similarity Score": round(score, 3),
+            "Similarity Score": round(similarity, 3),
             "Founder Score": f_score
         })
 
@@ -179,17 +174,24 @@ def score_startups(startups):
 def build_table(data):
     df = pd.DataFrame(data)
 
-    # 🔥 filtro VC real
-    df = df[
-        (df["Similarity Score"] > 0.75) &
-        (df["Founder Score"] >= 2)
-    ]
+    if df.empty:
+        return df
 
-    df = df.sort_values(by="Similarity Score", ascending=False)
+    # 🔥 combinar scores (clave VC)
+    df["Final Score"] = (
+        df["Similarity Score"] * 0.7 +
+        df["Founder Score"] * 0.3
+    )
+
+    # 🔥 filtro más flexible
+    df = df[df["Similarity Score"] > 0.65]
+
+    # ordenar
+    df = df.sort_values(by="Final Score", ascending=False)
 
     df["Rank"] = range(1, len(df)+1)
-    df["Fit"] = df["Similarity Score"].apply(
-        lambda x: "🔥 High" if x > 0.85 else ("👍 Medium" if x > 0.75 else "Low")
+    df["Fit"] = df["Final Score"].apply(
+        lambda x: "🔥 High" if x > 0.85 else ("👍 Medium" if x > 0.7 else "Low")
     )
 
     return df
@@ -212,5 +214,9 @@ if st.button("🚀 Run VC OS"):
         st.stop()
 
     df = build_table(scored)
+
+    if df.empty:
+        st.warning("No high-quality startups found. Showing all results.")
+        df = pd.DataFrame(scored)
 
     st.dataframe(df)
