@@ -1,15 +1,13 @@
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
+import feedparser
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-import re
 
 st.title("🚀 LeapScout AI - LATAM Deal Sourcing")
 
-# API KEY
+# -------- API KEY --------
 api_key = st.secrets.get("OPENAI_API_KEY", None)
 if not api_key:
     st.warning("⚠️ Falta API Key")
@@ -35,29 +33,28 @@ def get_portfolio():
         "Rappi is a delivery and logistics super app"
     ]
 
-# -------- SCRAPING --------
+# -------- SCRAPING (RSS NEWS) --------
 def scrape_startups():
-    queries = [
-        "startup ronda seed mexico fintech",
-        "startup pre seed colombia tecnologia",
-        "startup etapa temprana peru startup",
-        "startup seed chile saas"
+    feeds = [
+        "https://news.google.com/rss/search?q=startup+latam+seed&hl=es-419&gl=MX&ceid=MX:es-419",
+        "https://news.google.com/rss/search?q=startup+fintech+mexico+seed&hl=es-419&gl=MX&ceid=MX:es-419",
+        "https://news.google.com/rss/search?q=startup+colombia+pre-seed&hl=es-419&gl=CO&ceid=CO:es-419"
     ]
 
-    headers = {"User-Agent": "Mozilla/5.0"}
     results = []
 
-    for query in queries:
-        url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.text, "html.parser")
+    for url in feeds:
+        feed = feedparser.parse(url)
 
-        for g in soup.select(".tF2Cxc")[:3]:
-            title = g.select_one("h3")
-            snippet = g.select_one(".VwiC3b")
+        for entry in feed.entries[:5]:
+            text = f"{entry.title}. {entry.summary}"
 
-            if title and snippet:
-                text = f"{title.text}. {snippet.text}"
+            # filtro LATAM + etapa
+            if any(word in text.lower() for word in [
+                "mexico", "colombia", "peru", "chile", "argentina", "latam"
+            ]) and any(word in text.lower() for word in [
+                "seed", "pre-seed", "semilla"
+            ]):
                 results.append(text)
 
     return list(set(results))[:10]
@@ -67,7 +64,7 @@ def extract_info(text):
     text_lower = text.lower()
 
     # país
-    countries = ["mexico", "colombia", "peru", "chile", "argentina", "latam"]
+    countries = ["mexico", "colombia", "peru", "chile", "argentina"]
     country = next((c for c in countries if c in text_lower), "Unknown")
 
     # etapa
@@ -78,12 +75,12 @@ def extract_info(text):
     else:
         stage = "Unknown"
 
-    # nombre (heurística básica)
+    # nombre (heurística simple)
     name = text.split(".")[0][:60]
 
     return name, country.title(), stage
 
-# -------- FORMATTING --------
+# -------- CLEAN TEXT --------
 def clean_text(text):
     return f"Startup en Latinoamérica en etapa temprana: {text}"
 
@@ -97,11 +94,9 @@ if st.button("🔎 Run Deal Sourcing"):
         st.error("No se encontraron startups")
         st.stop()
 
-    # limpiar texto
     portfolio_clean = [clean_text(p) for p in portfolio]
     startups_clean = [clean_text(s) for s in startups_raw]
 
-    # embeddings
     portfolio_emb = get_embeddings(portfolio_clean)
     startup_emb = get_embeddings(startups_clean)
 
