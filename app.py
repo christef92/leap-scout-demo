@@ -1,12 +1,11 @@
 import streamlit as st
 import pandas as pd
-import feedparser
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import json
 
-st.title("🚀 LeapScout AI - LATAM Deal Sourcing")
+st.title("🚀 LeapScout AI - VC Grade Deal Sourcing")
 
 # -------- API KEY --------
 api_key = st.secrets.get("OPENAI_API_KEY", None)
@@ -16,14 +15,16 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-# -------- EMBEDDINGS --------
+# -------- DATASET REAL --------
 @st.cache_data
-def get_embeddings(texts):
-    res = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=texts
-    )
-    return [d.embedding for d in res.data]
+def load_startups():
+    url = "https://raw.githubusercontent.com/owid/owid-datasets/master/datasets/Startups%20and%20venture%20capital/Startups%20and%20venture%20capital.csv"
+    df = pd.read_csv(url)
+
+    # usar columna de nombre (ajustar si cambia)
+    df = df.head(100)
+
+    return df
 
 # -------- PORTFOLIO --------
 def get_portfolio():
@@ -34,130 +35,106 @@ def get_portfolio():
         "Rappi is a delivery and logistics super app"
     ]
 
-# -------- SCRAPING --------
-def scrape_startups():
-    queries = [
-        "startup latam seed",
-        "startup fintech mexico seed",
-        "startup colombia tecnologia seed",
-        "startup peru pre-seed",
-        "startup chile saas seed",
-        "startup argentina ronda seed",
-        "startup AI latam funding",
-        "startup early stage latin america"
-    ]
-
-    results = []
-
-    for q in queries:
-        url = f"https://news.google.com/rss/search?q={q.replace(' ', '+')}&hl=es-419&gl=MX&ceid=MX:es-419"
-        feed = feedparser.parse(url)
-
-        for entry in feed.entries:
-            text = f"{entry.title}. {entry.summary}"
-            results.append(text)
-
-    return list(set(results))[:50]
-
-# -------- GPT EXTRACTION (FIXED) --------
+# -------- EMBEDDINGS --------
 @st.cache_data
-def extract_structured(texts):
-    structured = []
+def get_embeddings(texts):
+    res = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=texts
+    )
+    return [d.embedding for d in res.data]
 
-    for t in texts:
+# -------- GPT ENRICHMENT --------
+@st.cache_data
+def enrich_startups(names):
+    enriched = []
+
+    for name in names:
         try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "system",
-                        "content": """Return ONLY valid JSON.
-
-Format:
+                        "content": """Return ONLY JSON:
 {
-"name": "string",
-"sector": "string",
-"country": "string",
-"stage": "string"
+"name": "",
+"sector": "",
+"country": "",
+"stage": ""
 }
-
-Rules:
-- No text outside JSON
-- If unknown use "Unknown"
 """
                     },
-                    {"role": "user", "content": t}
+                    {
+                        "role": "user",
+                        "content": f"Startup: {name}. Identify sector, country and if it's early stage."
+                    }
                 ],
                 temperature=0
             )
 
             content = response.choices[0].message.content.strip()
-
-            # limpiar markdown ```json
-            content = content.replace("```json", "").replace("```", "").strip()
+            content = content.replace("```json", "").replace("```", "")
 
             data = json.loads(content)
-            structured.append(data)
 
-        except Exception as e:
-            structured.append({
-                "name": "Unknown",
+            if not isinstance(data, dict):
+                raise ValueError
+
+            enriched.append(data)
+
+        except:
+            enriched.append({
+                "name": name,
                 "sector": "Unknown",
                 "country": "Unknown",
                 "stage": "Unknown"
             })
 
-    return structured
-
-# -------- CLEAN TEXT --------
-def clean_text(text):
-    return f"Startup en Latinoamérica en etapa temprana: {text}"
+    return enriched
 
 # -------- MAIN --------
-if st.button("🔎 Run Deal Sourcing"):
+if st.button("🔎 Run VC Deal Sourcing"):
+
+    df = load_startups()
+
+    # tomar nombres reales
+    startup_names = df.iloc[:, 0].dropna().astype(str).tolist()[:50]
 
     portfolio = get_portfolio()
-    startups_raw = scrape_startups()
 
-    if len(startups_raw) == 0:
-        st.error("No se encontraron startups")
-        st.stop()
+    # enriquecer
+    enriched = enrich_startups(startup_names)
 
-    # 🔥 extracción inteligente
-    structured = extract_structured(startups_raw)
+    # textos para embeddings
+    portfolio_clean = portfolio
+    startups_clean = [e["name"] for e in enriched]
 
-    # limpiar texto para embeddings
-    portfolio_clean = [clean_text(p) for p in portfolio]
-    startups_clean = [clean_text(s) for s in startups_raw]
-
-    # embeddings
     portfolio_emb = get_embeddings(portfolio_clean)
     startup_emb = get_embeddings(startups_clean)
 
     results = []
 
-    for i, s in enumerate(startups_raw):
+    for i, s in enumerate(enriched):
         emb = startup_emb[i]
         sims = cosine_similarity([emb], portfolio_emb)
         score = float(np.max(sims))
 
-        info = structured[i]
-
         results.append({
-            "Startup": info.get("name", "Unknown"),
-            "Sector": info.get("sector", "Unknown"),
-            "Country": info.get("country", "Unknown"),
-            "Stage": info.get("stage", "Unknown"),
+            "Startup": s.get("name", "Unknown"),
+            "Sector": s.get("sector", "Unknown"),
+            "Country": s.get("country", "Unknown"),
+            "Stage": s.get("stage", "Unknown"),
             "Similarity Score": round(score, 3)
         })
 
-    df = pd.DataFrame(results)
+    df_res = pd.DataFrame(results)
 
-    df = df.sort_values(by="Similarity Score", ascending=False)
+    df_res = df_res.sort_values(by="Similarity Score", ascending=False)
 
-    df["Rank"] = range(1, len(df)+1)
-    df["Fit"] = df["Similarity Score"].apply(
+    df_res["Rank"] = range(1, len(df_res)+1)
+    df_res["Fit"] = df_res["Similarity Score"].apply(
         lambda x: "🔥 High" if x > 0.85 else ("👍 Medium" if x > 0.75 else "Low")
     )
 
-    st.dataframe(df)
+    st.dataframe(df_res)
