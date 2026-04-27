@@ -1,4 +1,4 @@
-    import streamlit as st
+import streamlit as st
 import pandas as pd
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
