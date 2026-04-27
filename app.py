@@ -1,62 +1,71 @@
 import streamlit as st
 import pandas as pd
+import feedparser
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import json
 
-st.title("🚀 LeapScout AI - VC Grade Deal Sourcing")
+st.title("🚀 VC OS - Latin Leap")
 
-# -------- API KEY --------
-api_key = st.secrets.get("OPENAI_API_KEY", None)
-if not api_key:
-    st.warning("⚠️ Falta API Key")
-    st.stop()
-
-client = OpenAI(api_key=api_key)
-
-# -------- DATASET REAL --------
-@st.cache_data
-def load_startups():
-    url = "https://raw.githubusercontent.com/owid/owid-datasets/master/datasets/Startups%20and%20venture%20capital/Startups%20and%20venture%20capital.csv"
-    df = pd.read_csv(url)
-
-    # usar columna de nombre (ajustar si cambia)
-    df = df.head(100)
-
-    return df
+# -------- CONFIG --------
+client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
 # -------- PORTFOLIO --------
-def get_portfolio():
-    return [
-        "Kushki is a fintech company providing payment infrastructure in Latin America",
-        "La Haus is a digital real estate marketplace in Latin America",
-        "Uala is a neobank offering digital financial services",
-        "Rappi is a delivery and logistics super app"
+PORTFOLIO = [
+    "Fintech payments infrastructure in Latin America",
+    "Real estate marketplace LATAM",
+    "Digital banking / neobank LATAM",
+    "Logistics and delivery platforms"
+]
+
+# -------- 1. SOURCE --------
+def fetch_sources():
+    queries = [
+        "startup latam funding",
+        "fintech mexico ronda",
+        "startup colombia seed",
+        "startup chile inversion",
+        "startup argentina venture capital"
     ]
 
-# -------- EMBEDDINGS --------
-@st.cache_data
-def get_embeddings(texts):
-    res = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=texts
-    )
-    return [d.embedding for d in res.data]
+    data = []
 
-# -------- GPT ENRICHMENT --------
-@st.cache_data
-def enrich_startups(names):
-    enriched = []
+    for q in queries:
+        url = f"https://news.google.com/rss/search?q={q.replace(' ', '+')}&hl=es-419"
+        feed = feedparser.parse(url)
 
-    for name in names:
+        for entry in feed.entries:
+            data.append(f"{entry.title}. {entry.summary}")
+
+    return list(set(data))
+
+# -------- 2. CLEAN --------
+def clean_data(texts):
+    filtered = []
+
+    for t in texts:
+        tl = t.lower()
+
+        if any(c in tl for c in ["mexico","colombia","peru","chile","argentina","latam"]):
+            filtered.append(t)
+
+    return filtered[:100]
+
+# -------- 3. ENTITY EXTRACTION --------
+@st.cache_data
+def extract_entities(texts):
+    results = []
+
+    for t in texts:
         try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "system",
-                        "content": """Return ONLY JSON:
+                        "content": """Extract startup info. Return ONLY JSON:
+
 {
 "name": "",
 "sector": "",
@@ -65,10 +74,7 @@ def enrich_startups(names):
 }
 """
                     },
-                    {
-                        "role": "user",
-                        "content": f"Startup: {name}. Identify sector, country and if it's early stage."
-                    }
+                    {"role": "user", "content": t}
                 ],
                 temperature=0
             )
@@ -81,60 +87,75 @@ def enrich_startups(names):
             if not isinstance(data, dict):
                 raise ValueError
 
-            enriched.append(data)
+            results.append(data)
 
         except:
-            enriched.append({
-                "name": name,
-                "sector": "Unknown",
-                "country": "Unknown",
-                "stage": "Unknown"
-            })
+            continue
 
-    return enriched
+    return results
 
-# -------- MAIN --------
-if st.button("🔎 Run VC Deal Sourcing"):
+# -------- 4. SCORING --------
+@st.cache_data
+def get_embeddings(texts):
+    res = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=texts
+    )
+    return [d.embedding for d in res.data]
 
-    df = load_startups()
+def score_startups(startups):
+    portfolio_emb = get_embeddings(PORTFOLIO)
+    startup_emb = get_embeddings([s["name"] for s in startups])
 
-    # tomar nombres reales
-    startup_names = df.iloc[:, 0].dropna().astype(str).tolist()[:50]
+    scored = []
 
-    portfolio = get_portfolio()
-
-    # enriquecer
-    enriched = enrich_startups(startup_names)
-
-    # textos para embeddings
-    portfolio_clean = portfolio
-    startups_clean = [e["name"] for e in enriched]
-
-    portfolio_emb = get_embeddings(portfolio_clean)
-    startup_emb = get_embeddings(startups_clean)
-
-    results = []
-
-    for i, s in enumerate(enriched):
-        emb = startup_emb[i]
-        sims = cosine_similarity([emb], portfolio_emb)
+    for i, s in enumerate(startups):
+        sims = cosine_similarity([startup_emb[i]], portfolio_emb)
         score = float(np.max(sims))
 
-        results.append({
-            "Startup": s.get("name", "Unknown"),
-            "Sector": s.get("sector", "Unknown"),
-            "Country": s.get("country", "Unknown"),
-            "Stage": s.get("stage", "Unknown"),
-            "Similarity Score": round(score, 3)
+        scored.append({
+            **s,
+            "score": round(score, 3)
         })
 
-    df_res = pd.DataFrame(results)
+    return scored
 
-    df_res = df_res.sort_values(by="Similarity Score", ascending=False)
+# -------- 5. OUTPUT --------
+def build_table(data):
+    df = pd.DataFrame(data)
 
-    df_res["Rank"] = range(1, len(df_res)+1)
-    df_res["Fit"] = df_res["Similarity Score"].apply(
+    df = df.sort_values(by="score", ascending=False)
+
+    df["rank"] = range(1, len(df)+1)
+    df["fit"] = df["score"].apply(
         lambda x: "🔥 High" if x > 0.85 else ("👍 Medium" if x > 0.75 else "Low")
     )
 
-    st.dataframe(df_res)
+    return df
+
+# -------- MAIN --------
+if st.button("🚀 Run VC OS"):
+
+    # 1. source
+    raw = fetch_sources()
+
+    # 2. clean
+    clean = clean_data(raw)
+
+    # 3. extract
+    startups = extract_entities(clean)
+
+    if len(startups) == 0:
+        st.error("No startups extracted")
+        st.stop()
+
+    # remove unknown
+    startups = [s for s in startups if s["name"] != "Unknown"]
+
+    # 4. score
+    scored = score_startups(startups)
+
+    # 5. table
+    df = build_table(scored)
+
+    st.dataframe(df)
