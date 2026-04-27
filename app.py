@@ -26,7 +26,9 @@ def fetch_sources():
         "fintech mexico ronda",
         "startup colombia seed",
         "startup chile inversion",
-        "startup argentina venture capital"
+        "startup argentina venture capital",
+        "startup peru pre-seed",
+        "AI startup latam funding"
     ]
 
     data = []
@@ -84,50 +86,77 @@ def extract_entities(texts):
 
             data = json.loads(content)
 
-            if not isinstance(data, dict):
-                raise ValueError
-
-            results.append(data)
+            if isinstance(data, dict):
+                results.append(data)
 
         except:
             continue
 
     return results
 
-# -------- 4. SCORING --------
+# -------- 4. EMBEDDINGS (FIXED BATCH) --------
 @st.cache_data
 def get_embeddings(texts):
-    res = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=texts
-    )
-    return [d.embedding for d in res.data]
+    # limpiar textos
+    texts = [str(t)[:300] for t in texts if t and isinstance(t, str)]
 
+    # límite total
+    texts = texts[:66]
+
+    SUB_BATCH = 20
+    all_embeddings = []
+
+    for i in range(0, len(texts), SUB_BATCH):
+        batch = texts[i:i+SUB_BATCH]
+
+        res = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=batch
+        )
+
+        all_embeddings.extend([d.embedding for d in res.data])
+
+    return all_embeddings
+
+# -------- 5. SCORING --------
 def score_startups(startups):
+
+    valid_startups = [
+        s for s in startups
+        if isinstance(s.get("name"), str) and len(s["name"]) > 2
+    ][:66]
+
+    if len(valid_startups) == 0:
+        return []
+
     portfolio_emb = get_embeddings(PORTFOLIO)
-    startup_emb = get_embeddings([s["name"] for s in startups])
+    startup_names = [s["name"] for s in valid_startups]
+    startup_emb = get_embeddings(startup_names)
 
     scored = []
 
-    for i, s in enumerate(startups):
+    for i, s in enumerate(valid_startups):
         sims = cosine_similarity([startup_emb[i]], portfolio_emb)
         score = float(np.max(sims))
 
         scored.append({
-            **s,
-            "score": round(score, 3)
+            "Startup": s.get("name", "Unknown"),
+            "Sector": s.get("sector", "Unknown"),
+            "Country": s.get("country", "Unknown"),
+            "Stage": s.get("stage", "Unknown"),
+            "Score": round(score, 3)
         })
 
     return scored
 
-# -------- 5. OUTPUT --------
+# -------- 6. OUTPUT --------
 def build_table(data):
     df = pd.DataFrame(data)
 
-    df = df.sort_values(by="score", ascending=False)
+    df = df.sort_values(by="Score", ascending=False)
 
-    df["rank"] = range(1, len(df)+1)
-    df["fit"] = df["score"].apply(
+    df["Rank"] = range(1, len(df)+1)
+    df["Fit"] = df["Score"].apply(
         lambda x: "🔥 High" if x > 0.85 else ("👍 Medium" if x > 0.75 else "Low")
     )
 
@@ -149,13 +178,14 @@ if st.button("🚀 Run VC OS"):
         st.error("No startups extracted")
         st.stop()
 
-    # remove unknown
-    startups = [s for s in startups if s["name"] != "Unknown"]
-
     # 4. score
     scored = score_startups(startups)
 
-    # 5. table
+    if len(scored) == 0:
+        st.error("No valid startups after cleaning")
+        st.stop()
+
+    # 5. output
     df = build_table(scored)
 
     st.dataframe(df)
